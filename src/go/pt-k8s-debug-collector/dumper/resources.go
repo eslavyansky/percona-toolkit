@@ -16,10 +16,20 @@ func (d *Dumper) addPg1() error {
 		"pg_log": {"$PGBACKREST_DB_PATH/pg_log"},
 	}
 
+	tools := map[string][]toolLog{
+		"": {
+			{
+				filename: "pgbackrest-info.log",
+				args:     []string{"pgbackrest", "info"},
+			},
+		},
+	}
+
 	d.individualFiles = append(d.individualFiles, individualFile{
 		resourceName:  "pgo",
 		containerName: "database",
 		dirpaths:      dirpaths,
+		toolCmds:      tools,
 	})
 	return nil
 }
