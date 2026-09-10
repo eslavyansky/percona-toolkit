@@ -30,3 +30,10 @@ export TEST_MONGODB_S3_SECONDARY2_PORT=17023
 export MINIO_ENDPOINT=http://localhost:9000/
 export MINIO_ACCESS_KEY_ID=example00000
 export MINIO_SECRET_ACCESS_KEY=secret00000
+
+# PostgreSQL test instances provided by sandbox-pg/test-env
+export PG_IPV4_HOST=127.0.0.1
+export PG_USERNAME=postgres
+export PG_PASSWORD=root
+export PG_SOURCE_PORT=15432
+export PG_REPLICA_PORT=15433

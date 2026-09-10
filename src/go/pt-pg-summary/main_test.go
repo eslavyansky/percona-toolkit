@@ -14,6 +14,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,68 +35,90 @@ type Test struct {
 	password string
 }
 
+func (test Test) dsn(dbName string) string {
+	return fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
+		test.host, test.port, test.username, test.password, dbName)
+}
+
+// The sandbox-pg test environment provides a source and a physical replica,
+// both reachable over TCP and over a Unix socket in the instance directory.
 var tests []Test = []Test{
-	{"IPv4PG9", tu.IPv4Host, tu.IPv4PG9Port, tu.Username, tu.Password},
-	{"IPv4PG10", tu.IPv4Host, tu.IPv4PG10Port, tu.Username, tu.Password},
-	{"IPv4PG11", tu.IPv4Host, tu.IPv4PG11Port, tu.Username, tu.Password},
-	{"IPv4PG12", tu.IPv4Host, tu.IPv4PG12Port, tu.Username, tu.Password},
+	{"source", tu.IPv4Host, tu.SourcePort, tu.Username, tu.Password},
+	{"replica", tu.IPv4Host, tu.ReplicaPort, tu.Username, tu.Password},
+	{"source_socket", tu.SocketDir(tu.SourcePort), tu.SourcePort, tu.Username, tu.Password},
 }
 
 var logger = logrus.New()
 
+// testSleep is the pause CollectGlobalInfo takes between the two reads of the
+// status counters.  The tool defaults to 30 seconds; the tests only need the
+// code path to run.
+const testSleep = 1
+
+// sandboxAvailable tells whether the sandbox-pg source instance answered
+// during TestMain.  The tests are skipped, not failed, when it did not.
+var sandboxAvailable bool
+
 func TestMain(m *testing.M) {
 	logger.SetLevel(logrus.WarnLevel)
+	if db, err := connect(tests[0].dsn("postgres")); err == nil {
+		sandboxAvailable = true
+		db.Close()
+	}
 	code := m.Run()
 	os.Exit(code)
 }
 
+func skipIfNoSandbox(t *testing.T) {
+	if !sandboxAvailable {
+		t.Skipf("the sandbox-pg source instance does not answer on %s:%s, start it with 'sandbox-pg/test-env start'",
+			tu.IPv4Host, tu.SourcePort)
+	}
+}
+
+func connectTo(t *testing.T, test Test, dbName string) *sql.DB {
+	db, err := connect(test.dsn(dbName))
+	if err != nil {
+		t.Fatalf("Cannot connect to the db using %q: %s", test.dsn(dbName), err)
+	}
+	return db
+}
+
 func TestConnection(t *testing.T) {
-	// use an "external" IP to simulate a remote host
-	tests := append(tests, Test{"remote_host", tu.PG9DockerIP, tu.DefaultPGPort, tu.Username, tu.Password})
-	// use IPV6 for PostgreSQL 9
-	// tests := append(tests, Test{"IPV6", tu.IPv6Host, tu.IPv6PG9Port, tu.Username, tu.Password})
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			if _, err := connect(dsn); err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
+			db := connectTo(t, test, "postgres")
+			db.Close()
 		})
 	}
 }
 
 func TestNewWithLogger(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
-			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
-			if _, err := pginfo.NewWithLogger(db, nil, 30, logger); err != nil {
-				t.Errorf("Cannot run NewWithLogger using %q: %s", dsn, err)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			if _, err := pginfo.NewWithLogger(db, nil, testSleep, logger); err != nil {
+				t.Errorf("Cannot run NewWithLogger using %q: %s", test.dsn("postgres"), err)
 			}
 		})
 	}
 }
 
 func TestCollectGlobalInfo(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			info, err := pginfo.NewWithLogger(db, nil, testSleep, logger)
 			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
-			info, err := pginfo.NewWithLogger(db, nil, 30, logger)
-			if err != nil {
-				t.Errorf("Cannot run NewWithLogger using %q: %s", dsn, err)
+				t.Fatalf("Cannot run NewWithLogger using %q: %s", test.dsn("postgres"), err)
 			}
 			errs := info.CollectGlobalInfo(db)
 			if len(errs) > 0 {
@@ -103,35 +126,28 @@ func TestCollectGlobalInfo(t *testing.T) {
 				for _, err := range errs {
 					logger.Error(err)
 				}
-				t.Errorf("Cannot collect global information using %q", dsn)
+				t.Errorf("Cannot collect global information using %q", test.dsn("postgres"))
 			}
 		})
 	}
 }
 
 func TestCollectPerDatabaseInfo(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			info, err := pginfo.NewWithLogger(db, nil, testSleep, logger)
 			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
-			info, err := pginfo.NewWithLogger(db, nil, 30, logger)
-			if err != nil {
-				t.Errorf("Cannot run New using %q: %s", dsn, err)
+				t.Fatalf("Cannot run New using %q: %s", test.dsn("postgres"), err)
 			}
 			for _, dbName := range info.DatabaseNames() {
-				dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-					test.host, test.port, test.username, test.password, dbName)
-				conn, err := connect(dsn)
-				if err != nil {
-					t.Errorf("Cannot connect to the %s database using %q: %s", dbName, dsn, err)
-				}
+				conn := connectTo(t, test, dbName)
 				if err := info.CollectPerDatabaseInfo(conn, dbName); err != nil {
-					t.Errorf("Cannot collect information for the %s database using %q: %s", dbName, dsn, err)
+					t.Errorf("Cannot collect information for the %s database using %q: %s",
+						dbName, test.dsn(dbName), err)
 				}
 				conn.Close()
 			}
