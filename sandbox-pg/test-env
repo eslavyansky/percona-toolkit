@@ -1,0 +1,392 @@
+#!/bin/bash
+
+TMP_DIR=${TMP_DIR:-/tmp}
+
+# This script controls the PostgreSQL part of the Percona Toolkit test
+# environment.  The basic environment is a source on port 15432 in
+# ${TMP_DIR}/15432 and a physical replica on port 15433 in ${TMP_DIR}/15433.
+# It checks that PERCONA_TOOLKIT_BRANCH and PT_PG_SANDBOX_BASEDIR are correct.
+# Exit 0 on success/no errors, or 1 on any warnings or errors.
+
+SOURCE_PORT=15432
+REPLICA_PORT=15433
+
+err() {
+    for msg; do
+        echo "$msg" >&2
+    done
+
+    if [ "$DEBUG_SANDBOXES" ]; then
+        echo
+        echo "PostgreSQL processes:" >&2
+        ps x | grep postgres >&2
+
+        echo
+        for p in $SOURCE_PORT $REPLICA_PORT; do
+            echo "Sandbox $p:" >&2
+            if [ -d "${TMP_DIR}/$p" ]; then
+                ls -lh ${TMP_DIR}/$p >&2
+                echo
+                [ -f "${TMP_DIR}/$p/data/pg.log" ] && tail -n 100 ${TMP_DIR}/$p/data/pg.log >&2
+            else
+                echo "${TMP_DIR}/$p does not exist" >&2
+            fi
+        done
+    fi
+}
+
+usage() {
+    err "Usage: test-env start|stop|restart|status|checkconfig|kill"       \
+        ""                                                                 \
+        "  start       Start test servers in ${TMP_DIR}/PORT"              \
+        "  stop        Stop test servers and remove all ${TMP_DIR}/PORT"   \
+        "  kill        Kill test servers (use if stop fails)"              \
+        "  restart     Stop and start test servers"                        \
+        "  status      Print status of test servers"                       \
+        "  checkconfig Check test env and test servers"                    \
+        ""
+}
+
+_seq() {
+    local i="$1"
+    awk "BEGIN { for(i=1; i<=$i; i++) print i; }"
+}
+
+pg_major() {
+    local version=`$PT_PG_SANDBOX_BASEDIR/bin/postgres --version 2>/dev/null | awk '{print $3}'`
+    local major=${version%%.*}
+
+    case "$major" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    if [ $major -lt 10 ]; then
+        major=`echo $version | cut -d. -f1,2`
+    fi
+
+    echo $major
+}
+
+basedir_ok() {
+    local basedir=$1
+
+    if [ -z "$basedir" ] || [ ! -d "$basedir" ]; then
+        return 1
+    fi
+
+    for bin in initdb pg_basebackup pg_ctl postgres psql pg_isready; do
+        if [ ! -x "$basedir/bin/$bin" ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+checkconfig() {
+    local print_conf=$1
+    local stat=""
+    conf_err=0
+
+    if [ -z "$PERCONA_TOOLKIT_BRANCH" ] || [ ! -d "$PERCONA_TOOLKIT_BRANCH" ]; then
+        conf_err=1
+        stat="INVALID"
+    else
+        stat="ok"
+    fi
+    if [ $print_conf ]; then
+        echo "PERCONA_TOOLKIT_BRANCH=$PERCONA_TOOLKIT_BRANCH - $stat"
+    fi
+
+    if basedir_ok "$PT_PG_SANDBOX_BASEDIR"; then
+        stat="ok"
+    else
+        conf_err=1
+        stat="INVALID"
+    fi
+    if [ $print_conf ]; then
+        echo "PT_PG_SANDBOX_BASEDIR=$PT_PG_SANDBOX_BASEDIR - $stat"
+    fi
+
+    local major=`pg_major`
+    if [ -n "$major" ]; then
+        stat="ok"
+    else
+        conf_err=1
+        stat="INVALID"
+    fi
+    if [ $print_conf ]; then
+        echo "PostgreSQL major version=$major - $stat"
+    fi
+
+    local server_dir="$PERCONA_TOOLKIT_BRANCH/sandbox-pg/servers/$major"
+    if [ -n "$major" ] && [ -d "$server_dir" ]; then
+        stat="ok"
+    else
+        conf_err=1
+        stat="INVALID"
+    fi
+    if [ $print_conf ]; then
+        echo "Server config dir=$server_dir - $stat"
+    fi
+
+    # PostgreSQL puts its Unix socket in ${TMP_DIR}/PORT and the kernel limits
+    # the socket path to 107 bytes.
+    local socket_path="${TMP_DIR}/$REPLICA_PORT/.s.PGSQL.$REPLICA_PORT"
+    if [ ${#socket_path} -le 107 ]; then
+        stat="ok"
+    else
+        conf_err=1
+        stat="INVALID: the Unix socket path would be ${#socket_path} bytes, the limit is 107"
+    fi
+    if [ $print_conf ]; then
+        echo "TMP_DIR=$TMP_DIR - $stat"
+    fi
+
+    return $conf_err
+}
+
+instance_is_alive() {
+    local port=$1
+    $PT_PG_SANDBOX_BASEDIR/bin/pg_isready -h ${TMP_DIR}/$port -p $port -q >/dev/null 2>&1
+}
+
+instance_is_running() {
+    local port=$1
+    ps xw | grep postgres | grep -v grep | grep ${TMP_DIR}/$port/data >/dev/null
+}
+
+sandbox_status() {
+    local type=$1
+    local port=$2
+    local status=0
+
+    echo "PostgreSQL $type test server on port $port:"
+
+    echo -n "  PID file exists - "
+    if [ -f "${TMP_DIR}/$port/data/postmaster.pid" ]; then
+        echo "yes"
+        local pid=`head -n 1 ${TMP_DIR}/$port/data/postmaster.pid 2>/dev/null`
+        echo -n "  process $pid is alive - "
+        if kill -0 $pid >/dev/null 2>&1; then
+            echo "yes"
+        else
+            echo "NO"
+            status=1
+        fi
+    else
+        echo "NO"
+        status=1
+    fi
+
+    echo -n "  server accepts connections - "
+    if instance_is_alive $port; then
+        echo "yes"
+    else
+        echo "NO"
+        status=1
+    fi
+
+    echo -n "  SELECT 1 works - "
+    if [ "`${TMP_DIR}/$port/use -Atc 'SELECT 1' 2>/dev/null`" = "1" ]; then
+        echo "yes"
+    else
+        echo "NO"
+        status=1
+    fi
+
+    if [ "$type" = "replica" ]; then
+        echo -n "  server is in recovery - "
+        if [ "`${TMP_DIR}/$port/use -Atc 'SELECT pg_is_in_recovery()' 2>/dev/null`" = "t" ]; then
+            echo "yes"
+        else
+            echo "NO"
+            status=1
+        fi
+
+        echo -n "  WAL receiver is streaming - "
+        if [ "`${TMP_DIR}/$port/use -Atc \"SELECT status FROM pg_stat_wal_receiver\" 2>/dev/null`" = "streaming" ]; then
+            echo "yes"
+        else
+            echo "NO"
+            status=1
+        fi
+    fi
+
+    for db in pagila pt_test_b; do
+        echo -n "  database $db exists - "
+        if [ "`${TMP_DIR}/$port/use -Atc \"SELECT 1 FROM pg_database WHERE datname = '$db'\" 2>/dev/null`" = "1" ]; then
+            echo "yes"
+        else
+            echo "NO"
+            status=1
+        fi
+    done
+
+    return $status
+}
+
+kill_sandbox() {
+    local p=$1
+
+    if instance_is_running $p; then
+        # -W so that a hung server does not make kill wait for it.
+        $PT_PG_SANDBOX_BASEDIR/bin/pg_ctl -D ${TMP_DIR}/$p/data -m immediate -W stop >/dev/null 2>&1
+        sleep 1
+
+        if instance_is_running $p; then
+            local pid=`head -n 1 ${TMP_DIR}/$p/data/postmaster.pid 2>/dev/null`
+            pkill -9 -f "postgres.*${TMP_DIR}/$p/data" >/dev/null 2>&1
+            sleep 1
+
+            if instance_is_running $p; then
+                err "Failed to kill PostgreSQL test server on port $p (PID $pid)"
+                return 1
+            else
+                echo "Killed PostgreSQL test server on port $p (PID $pid)"
+            fi
+        else
+            echo "Killed PostgreSQL test server on port $p"
+        fi
+    fi
+
+    if [ -d "${TMP_DIR}/$p" ]; then
+        rm -rf ${TMP_DIR}/$p
+        echo "Removed ${TMP_DIR}/$p"
+    fi
+
+    return 0
+}
+
+# ###########################################################################
+# Script starts here.
+# ###########################################################################
+opt=$1
+exit_status=0
+
+if [ -z "$opt" ]; then
+    usage
+    exit 1
+fi
+
+if [ "$opt" = "checkconfig" ]; then
+    checkconfig 1
+    exit $?
+fi
+
+checkconfig
+if [ $conf_err -eq 1 ]; then
+    err "The Percona Toolkit PostgreSQL test environment config is invalid." \
+        "Run '$0 checkconfig' to see the current configuration."
+    exit 1
+fi
+
+case $opt in
+    start)
+        cd $PERCONA_TOOLKIT_BRANCH/sandbox-pg
+
+        ./start-sandbox source $SOURCE_PORT
+        exit_status=$((exit_status | $?))
+
+        if [ $exit_status -eq 0 ]; then
+            echo -n "Loading pagila database... "
+            ./load-pagila-db $SOURCE_PORT
+            if [ $? -eq 0 ]; then
+                echo "OK"
+            else
+                echo "FAILED"
+                exit_status=$((exit_status | 1))
+            fi
+
+            echo -n "Loading the second test database... "
+            ./load-test-dbs $SOURCE_PORT
+            if [ $? -eq 0 ]; then
+                echo "OK"
+            else
+                echo "FAILED"
+                exit_status=$((exit_status | 1))
+            fi
+        fi
+
+        if [ $exit_status -eq 0 ]; then
+            # The replica is created after the databases are loaded, so the
+            # base backup already contains them.
+            ./start-sandbox replica $REPLICA_PORT $SOURCE_PORT
+            exit_status=$((exit_status | $?))
+        fi
+
+        if [ $exit_status -eq 0 ]; then
+            ping=`${TMP_DIR}/$SOURCE_PORT/use -Atc "SELECT md5(random()::text)"`
+            ${TMP_DIR}/$SOURCE_PORT/use -q -c \
+                "INSERT INTO percona_test.sentinel (id, ping) VALUES (1, '$ping')
+                 ON CONFLICT (id) DO UPDATE SET ping = EXCLUDED.ping"
+            exit_status=$((exit_status | $?))
+
+            echo -n "Waiting for replication to finish..."
+            for i in $(_seq 60); do
+                pong=`${TMP_DIR}/$REPLICA_PORT/use -Atc \
+                    "SELECT ping FROM percona_test.sentinel WHERE id = 1 AND ping = '$ping'" 2>/dev/null`
+                [ "$ping" = "$pong" ] && break
+                echo -n '.'
+                sleep 1
+            done
+
+            if [ "$ping" = "$pong" ]; then
+                echo " OK"
+            else
+                echo " FAILED"
+                exit_status=$((exit_status | 1))
+            fi
+        fi
+
+        if [ $exit_status -eq 0 ]; then
+            echo "Percona Toolkit PostgreSQL test environment started with PostgreSQL v`pg_major`."
+        else
+            DEBUG_SANDBOXES=1
+            err "There was an error starting the Percona Toolkit PostgreSQL test environment."
+        fi
+        ;;
+    stop)
+        cd $PERCONA_TOOLKIT_BRANCH/sandbox-pg
+        ./stop-sandbox $REPLICA_PORT $SOURCE_PORT
+        exit_status=$((exit_status | $?))
+        if [ $exit_status -eq 0 ]; then
+            echo "Percona Toolkit PostgreSQL test environment stopped."
+        else
+            DEBUG_SANDBOXES=1
+            err "Error stopping the Percona Toolkit PostgreSQL test environment."
+        fi
+        ;;
+    kill)
+        # This is a blunt approach for killing the entire test env when a
+        # polite stop fails.  It uses kill -9 as a last resort.
+        for port in $REPLICA_PORT $SOURCE_PORT; do
+            kill_sandbox $port
+            exit_status=$((exit_status | $?))
+        done
+        ;;
+    restart)
+        $0 stop
+        $0 start
+        exit_status=$?
+        ;;
+    status)
+        sandbox_status 'source' $SOURCE_PORT
+        source_status=$?
+        sandbox_status 'replica' $REPLICA_PORT
+        replica_status=$?
+        echo -n "Percona Toolkit PostgreSQL test environment is "
+        if [ $source_status -eq 0 ] && [ $replica_status -eq 0 ]; then
+            echo "ok!"
+        else
+            echo "invalid."
+            exit_status=1
+        fi
+        ;;
+    *)
+        usage
+        exit_status=1
+        ;;
+esac
+
+exit $exit_status
