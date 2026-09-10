@@ -1,0 +1,41 @@
+#!/bin/sh
+
+start_ts=$(date +%s)
+
+BASEDIR="PT_PG_SANDBOX_BASEDIR"
+PGDATA="TMP_DIR/PORT/data"
+
+sandbox_is_running() {
+   $BASEDIR/bin/pg_ctl -D $PGDATA status >/dev/null 2>&1
+}
+
+_seq() {
+   local i="$1"
+   awk "BEGIN { for(i=1; i<=$i; i++) print i; }"
+}
+
+# #############################################################################
+# Script starts here
+# #############################################################################
+
+echo -n "Stopping PostgreSQL test server on port PORT... "
+
+if sandbox_is_running; then
+   $BASEDIR/bin/pg_ctl -D $PGDATA -m fast stop >/dev/null 2>&1
+fi
+
+for i in $(_seq 60); do
+   if sandbox_is_running; then
+      sleep 1
+      continue
+   fi
+   end_ts=$(date +%s)
+   t=$((end_ts - start_ts))
+   echo "OK (${t}s)"
+   exit 0
+done
+
+end_ts=$(date +%s)
+t=$((end_ts - start_ts))
+echo "FAILED (${t}s)"
+exit 1

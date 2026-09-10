@@ -1,0 +1,7 @@
+#!/bin/sh
+
+BASEDIR="PT_PG_SANDBOX_BASEDIR"
+
+$BASEDIR/bin/psql --host=TMP_DIR/PORT --port=PORT --username=postgres --dbname=postgres "$@"
+
+exit $?
