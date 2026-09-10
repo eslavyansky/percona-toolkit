@@ -1,0 +1,53 @@
+#!/bin/sh
+TMP_DIR=${TMP_DIR:-/tmp}
+
+die() {
+   echo
+   for msg; do
+      echo $msg
+   done
+   exit 1
+}
+
+# ###########################################################################
+# Sanity check the cmd line options.
+# ###########################################################################
+if [ $# -lt 1 ]; then
+   die "Usage: load-pagila-db PORT [DATABASE]"
+fi
+
+PORT=$1
+DB=${2:-"pagila"}
+
+if [ ! -d "${TMP_DIR}/$PORT" ]; then
+   die "PostgreSQL test server does not exist: ${TMP_DIR}/$PORT"
+fi
+
+# ###########################################################################
+# Sanity check the environment.
+# ###########################################################################
+if [ -z "$PERCONA_TOOLKIT_BRANCH" ]; then
+   die "PERCONA_TOOLKIT_BRANCH environment variable is not set."
+fi
+
+if [ ! -d "$PERCONA_TOOLKIT_BRANCH" ]; then
+   die "Invalid PERCONA_TOOLKIT_BRANCH directory: $PERCONA_TOOLKIT_BRANCH"
+fi
+
+PAGILA_DIR="$PERCONA_TOOLKIT_BRANCH/sandbox-pg/pagila"
+
+for file in pagila-schema.sql pagila-data.sql; do
+   if [ ! -f "$PAGILA_DIR/$file" ]; then
+      die "$PAGILA_DIR/$file does not exist."
+   fi
+done
+
+PGOPTIONS="-c client_min_messages=warning" ${TMP_DIR}/$PORT/use -q -c "DROP DATABASE IF EXISTS $DB" || exit 1
+${TMP_DIR}/$PORT/use -q -c "CREATE DATABASE $DB"         || exit 1
+
+${TMP_DIR}/$PORT/use -v ON_ERROR_STOP=1 -q -d $DB -f $PAGILA_DIR/pagila-schema.sql >/dev/null || exit 1
+${TMP_DIR}/$PORT/use -v ON_ERROR_STOP=1 -q -d $DB -f $PAGILA_DIR/pagila-data.sql   >/dev/null || exit 1
+
+${TMP_DIR}/$PORT/use -q -d $DB -c "ANALYZE" >/dev/null
+
+exit $?
