@@ -14,10 +14,12 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -34,104 +36,138 @@ type Test struct {
 	password string
 }
 
+func (test Test) dsn(dbName string) string {
+	return fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
+		test.host, test.port, test.username, test.password, dbName)
+}
+
 var tests []Test = []Test{
-	{"IPv4PG9", tu.IPv4Host, tu.IPv4PG9Port, tu.Username, tu.Password},
-	{"IPv4PG10", tu.IPv4Host, tu.IPv4PG10Port, tu.Username, tu.Password},
-	{"IPv4PG11", tu.IPv4Host, tu.IPv4PG11Port, tu.Username, tu.Password},
-	{"IPv4PG12", tu.IPv4Host, tu.IPv4PG12Port, tu.Username, tu.Password},
+	{"source", tu.IPv4Host, tu.SourcePort, tu.Username, tu.Password},
+	{"replica", tu.IPv4Host, tu.ReplicaPort, tu.Username, tu.Password},
+	{"source_socket", tu.SocketDir, tu.SourcePort, tu.Username, tu.Password},
 }
 
 var logger = logrus.New()
 
+const testSleep = 1
+
+var sandboxAvailable bool
+
 func TestMain(m *testing.M) {
 	logger.SetLevel(logrus.WarnLevel)
+	if db, err := connect(tests[0].dsn("postgres")); err == nil {
+		sandboxAvailable = true
+		db.Close()
+	}
 	code := m.Run()
 	os.Exit(code)
 }
 
+func skipIfNoSandbox(t *testing.T) {
+	if sandboxAvailable {
+		return
+	}
+	if os.Getenv("PT_PG_SANDBOX_REQUIRED") != "" {
+		t.Fatalf("no sandbox on %s:%s and PT_PG_SANDBOX_REQUIRED is set", tu.IPv4Host, tu.SourcePort)
+	}
+	t.Skipf("no sandbox on %s:%s, run sandbox-pg/test-env start", tu.IPv4Host, tu.SourcePort)
+}
+
+func skipIfNoSocket(t *testing.T, test Test) {
+	if test.host != "" {
+		return
+	}
+	if os.Getenv("PT_PG_SANDBOX_REQUIRED") != "" {
+		t.Fatal("no PG_SOCKET_DIR and PT_PG_SANDBOX_REQUIRED is set")
+	}
+	t.Skip("no unix_socket_directories on this server")
+}
+
+func connectTo(t *testing.T, test Test, dbName string) *sql.DB {
+	db, err := connect(test.dsn(dbName))
+	if err != nil {
+		t.Fatalf("Cannot connect to the db using %q: %s", test.dsn(dbName), err)
+	}
+	return db
+}
+
 func TestConnection(t *testing.T) {
-	// use an "external" IP to simulate a remote host
-	tests := append(tests, Test{"remote_host", tu.PG9DockerIP, tu.DefaultPGPort, tu.Username, tu.Password})
-	// use IPV6 for PostgreSQL 9
-	// tests := append(tests, Test{"IPV6", tu.IPv6Host, tu.IPv6PG9Port, tu.Username, tu.Password})
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			if _, err := connect(dsn); err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
+			skipIfNoSocket(t, test)
+			db := connectTo(t, test, "postgres")
+			db.Close()
 		})
 	}
 }
 
 func TestNewWithLogger(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
-			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
-			if _, err := pginfo.NewWithLogger(db, nil, 30, logger); err != nil {
-				t.Errorf("Cannot run NewWithLogger using %q: %s", dsn, err)
+			skipIfNoSocket(t, test)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			if _, err := pginfo.NewWithLogger(db, nil, testSleep, logger); err != nil {
+				t.Errorf("Cannot run NewWithLogger using %q: %s", test.dsn("postgres"), err)
 			}
 		})
 	}
 }
 
 func TestCollectGlobalInfo(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
+			skipIfNoSocket(t, test)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			info, err := pginfo.NewWithLogger(db, nil, testSleep, logger)
 			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
-			}
-			info, err := pginfo.NewWithLogger(db, nil, 30, logger)
-			if err != nil {
-				t.Errorf("Cannot run NewWithLogger using %q: %s", dsn, err)
+				t.Fatalf("Cannot run NewWithLogger using %q: %s", test.dsn("postgres"), err)
 			}
 			errs := info.CollectGlobalInfo(db)
 			if len(errs) > 0 {
-				logger.Errorf("Cannot collect info")
 				for _, err := range errs {
-					logger.Error(err)
+					t.Logf("collect error: %s", err)
 				}
-				t.Errorf("Cannot collect global information using %q", dsn)
+				t.Errorf("Cannot collect global information using %q", test.dsn("postgres"))
 			}
 		})
 	}
 }
 
 func TestCollectPerDatabaseInfo(t *testing.T) {
+	skipIfNoSandbox(t)
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-				test.host, test.port, test.username, test.password, "postgres")
-			db, err := connect(dsn)
+			skipIfNoSocket(t, test)
+			db := connectTo(t, test, "postgres")
+			defer db.Close()
+			info, err := pginfo.NewWithLogger(db, nil, testSleep, logger)
 			if err != nil {
-				t.Errorf("Cannot connect to the db using %q: %s", dsn, err)
+				t.Fatalf("Cannot run New using %q: %s", test.dsn("postgres"), err)
 			}
-			info, err := pginfo.NewWithLogger(db, nil, 30, logger)
-			if err != nil {
-				t.Errorf("Cannot run New using %q: %s", dsn, err)
-			}
-			for _, dbName := range info.DatabaseNames() {
-				dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s sslmode=disable dbname=%s",
-					test.host, test.port, test.username, test.password, dbName)
-				conn, err := connect(dsn)
-				if err != nil {
-					t.Errorf("Cannot connect to the %s database using %q: %s", dbName, dsn, err)
+			names := info.DatabaseNames()
+			n := 0
+			for _, name := range names {
+				if name != "postgres" && !strings.HasPrefix(name, "template") {
+					n++
 				}
+			}
+			if n < 2 {
+				t.Errorf("expected at least 2 user databases, got %d: %v", n, names)
+			}
+			for _, dbName := range names {
+				conn := connectTo(t, test, dbName)
 				if err := info.CollectPerDatabaseInfo(conn, dbName); err != nil {
-					t.Errorf("Cannot collect information for the %s database using %q: %s", dbName, dsn, err)
+					t.Errorf("Cannot collect information for the %s database using %q: %s",
+						dbName, test.dsn(dbName), err)
 				}
 				conn.Close()
 			}
@@ -139,21 +175,54 @@ func TestCollectPerDatabaseInfo(t *testing.T) {
 	}
 }
 
-// semVerRE is the SemVer pattern from https://semver.org (RE2-compatible
-// variant), used to validate the version line printed by --version.
+func TestReplicationTopology(t *testing.T) {
+	skipIfNoSandbox(t)
+
+	source := connectTo(t, tests[0], "postgres")
+	defer source.Close()
+
+	var inRecovery bool
+	if err := source.QueryRow("SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+		t.Fatalf("pg_is_in_recovery on %s: %s", tests[0].name, err)
+	}
+	if inRecovery {
+		t.Errorf("%s is in recovery, expected the primary", tests[0].name)
+	}
+
+	info, err := pginfo.NewWithLogger(source, nil, testSleep, logger)
+	if err != nil {
+		t.Fatalf("Cannot run NewWithLogger using %q: %s", tests[0].dsn("postgres"), err)
+	}
+	if errs := info.CollectGlobalInfo(source); len(errs) > 0 {
+		for _, err := range errs {
+			t.Logf("collect error: %s", err)
+		}
+		t.Fatalf("Cannot collect global information using %q", tests[0].dsn("postgres"))
+	}
+	if len(info.SlaveHosts10) == 0 {
+		t.Errorf("no standby connected to %s, the sandbox is not replicating", tests[0].name)
+	}
+
+	replica := connectTo(t, tests[1], "postgres")
+	defer replica.Close()
+
+	if err := replica.QueryRow("SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+		t.Fatalf("pg_is_in_recovery on %s: %s", tests[1].name, err)
+	}
+	if !inRecovery {
+		t.Errorf("%s is not in recovery, expected the standby", tests[1].name)
+	}
+}
+
 const semVerRE = `(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)` +
 	`(?:-(?:(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?` +
 	`(?:\+(?:[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?`
 
-/*
-Option --version
-*/
 func TestVersionOption(t *testing.T) {
 	out, err := exec.Command("../../../bin/"+toolname, "--version").Output()
 	if err != nil {
 		t.Errorf("error executing %s --version: %s", toolname, err.Error())
 	}
-	// We are using MustCompile here, because hard-coded RE should not fail
 	re := regexp.MustCompile(toolname + `\n.*Version v?` + semVerRE + `\n`)
 	if !re.Match(out) {
 		t.Errorf("%s --version returns wrong result:\n%s", toolname, out)
