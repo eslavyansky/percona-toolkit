@@ -143,10 +143,10 @@ write_env_file() {
     local pgs=$1
     local host sport rport user sockdir
 
-    host=$("$pgs" config get host -s "$PRIMARY_DIR")       || return 1
-    sport=$("$pgs" config get port -s "$PRIMARY_DIR")      || return 1
-    rport=$("$pgs" config get port -s "$REPLICA_DIR")      || return 1
-    user=$("$pgs" config get superuser -s "$PRIMARY_DIR")  || return 1
+    host=$("$pgs" config get -s "$PRIMARY_DIR" host)       || return 1
+    sport=$("$pgs" config get -s "$PRIMARY_DIR" port)      || return 1
+    rport=$("$pgs" config get -s "$REPLICA_DIR" port)      || return 1
+    user=$("$pgs" config get -s "$PRIMARY_DIR" superuser)  || return 1
 
     sockdir=$("$PT_PG_SANDBOX_BASEDIR/bin/psql" -h "$host" -p "$sport" -U "$user" \
         -d postgres -Atc 'SHOW unix_socket_directories' 2>/dev/null |

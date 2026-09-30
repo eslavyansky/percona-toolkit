@@ -69,7 +69,7 @@ and the readline and zlib headers.
 
 ```sh
 export PERCONA_TOOLKIT_BRANCH=$(pwd)
-export PT_PG_SANDBOX_BASEDIR=$(pg_sandbox build 18.4 --bin-dir ~/pgsql)
+export PT_PG_SANDBOX_BASEDIR=$(pg_sandbox build --bin-dir ~/pgsql 18.4)
 ```
 
 ## Usage
