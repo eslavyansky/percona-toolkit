@@ -13,7 +13,8 @@ processes under `/tmp`.
 ## Prerequisites
 
 - PostgreSQL 18 binaries.
-- Go, to build and run the tests.
+- Go 1.27 or newer, to build and run the tests. If your distribution ships an
+  older Go, set `GOTOOLCHAIN=auto` and `go` downloads the required version.
 - [`pg_sandbox`][pgs] v1.0.1 or newer, on `PATH` or pointed at by
   `PG_SANDBOX_BIN`. Either take a pre-built binary from the [releases
   page][rel] — `pg_sandbox-linux-amd64`, `pg_sandbox-linux-arm64`,
@@ -45,6 +46,7 @@ Fedora's server puts the Unix socket in `/var/run/postgresql`, which only the
 sudo dnf install -y postgresql-server postgresql golang
 echo 'd /run/postgresql 1777 postgres postgres -' | sudo tee /etc/tmpfiles.d/postgresql.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/postgresql.conf
+export GOTOOLCHAIN=auto
 export PERCONA_TOOLKIT_BRANCH=$(pwd)
 export PT_PG_SANDBOX_BASEDIR=/usr
 ```
@@ -60,6 +62,7 @@ sudo apt-get install -y postgresql-common
 sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
 sudo apt-get install -y postgresql-18 golang
 sudo usermod -aG postgres "$USER"
+export GOTOOLCHAIN=auto
 export PERCONA_TOOLKIT_BRANCH=$(pwd)
 export PT_PG_SANDBOX_BASEDIR=/usr/lib/postgresql/18
 ```
@@ -76,10 +79,11 @@ export PT_PG_SANDBOX_BASEDIR=$(brew --prefix postgresql@18)
 
 Instead of installing packages, `pg_sandbox` can download and compile
 PostgreSQL itself. This works on Linux and macOS, needs no root, and keeps
-several versions side by side. It needs a C compiler, `make`, `bison`, `flex`
-and the readline and zlib headers.
+several versions side by side. It needs a C compiler, `make`, `bison`, `flex`,
+Perl and the readline and zlib headers. On Fedora:
 
 ```sh
+sudo dnf install -y gcc make bison flex perl readline-devel zlib-devel
 export PERCONA_TOOLKIT_BRANCH=$(pwd)
 export PT_PG_SANDBOX_BASEDIR=$(pg_sandbox build --bin-dir ~/pgsql 18.4)
 ```
