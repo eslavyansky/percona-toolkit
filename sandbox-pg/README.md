@@ -72,6 +72,18 @@ export PERCONA_TOOLKIT_BRANCH=$(pwd)
 export PT_PG_SANDBOX_BASEDIR=$(brew --prefix postgresql@18)
 ```
 
+### Any platform: build with `pg_sandbox`
+
+Instead of installing packages, `pg_sandbox` can download and compile
+PostgreSQL itself. This works on Linux and macOS, needs no root, and keeps
+several versions side by side. It needs a C compiler, `make`, `bison`, `flex`
+and the readline and zlib headers.
+
+```sh
+export PERCONA_TOOLKIT_BRANCH=$(pwd)
+export PT_PG_SANDBOX_BASEDIR=$(pg_sandbox build 18.4 --bin-dir ~/pgsql)
+```
+
 ## Usage
 
 ```sh
