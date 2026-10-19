@@ -39,7 +39,7 @@ type PGInfo struct {
 	DatabaseWaitEvents []*models.DatabaseWaitEvents
 	AllDatabases       []*models.Databases
 	GlobalWaitEvents   []*models.GlobalWaitEvents
-	PortAndDatadir     *models.PortAndDatadir
+	PortAndDatadir     []*models.PortAndDatadir
 	SlaveHosts96       []*models.SlaveHosts96
 	SlaveHosts10       []*models.SlaveHosts10
 	Tablespaces        []*models.Tablespaces
@@ -190,7 +190,7 @@ func (i *PGInfo) CollectGlobalInfo(db models.XODB) []error {
 	}
 
 	i.logger.Info("Collecting Port and Data Dir information")
-	if i.PortAndDatadir, err = models.GetPortAndDatadir(db); err != nil {
+	if i.PortAndDatadir, err = models.GetPortAndDatadirs(db); err != nil {
 		errs = append(errs, errors.Wrap(err, "Cannot get Port and Dir"))
 	}
 
