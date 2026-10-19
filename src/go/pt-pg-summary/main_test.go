@@ -138,7 +138,55 @@ func TestCollectGlobalInfo(t *testing.T) {
 				for _, err := range errs {
 					t.Logf("collect error: %s", err)
 				}
-				t.Errorf("Cannot collect global information using %q", test.dsn("postgres"))
+				t.Fatalf("Cannot collect global information using %q", test.dsn("postgres"))
+			}
+
+			var serverVersion string
+			if err := db.QueryRow("SHOW server_version").Scan(&serverVersion); err != nil {
+				t.Fatalf("SHOW server_version: %s", err)
+			}
+			segments := info.ServerVersion.Segments()
+			if prefix := fmt.Sprintf("%d.%d", segments[0], segments[1]); !strings.HasPrefix(serverVersion, prefix) {
+				t.Errorf("ServerVersion = %s, the server reports %s", info.ServerVersion, serverVersion)
+			}
+
+			portAndDatadir := map[string]string{}
+			for _, row := range info.PortAndDatadir {
+				portAndDatadir[row.Name] = row.Setting
+			}
+			if portAndDatadir["port"] != test.port || portAndDatadir["data_directory"] == "" {
+				t.Errorf("PortAndDatadir = %v, want port %s and a data_directory", portAndDatadir, test.port)
+			}
+
+			if len(info.ClusterInfo) != 1 {
+				t.Fatalf("ClusterInfo has %d rows, want 1", len(info.ClusterInfo))
+			}
+			cluster := info.ClusterInfo[0]
+			if cluster.Usename != test.username {
+				t.Errorf("ClusterInfo.Usename = %q, want %q", cluster.Usename, test.username)
+			}
+			if standby := test.port == tu.ReplicaPort; cluster.IsSlave != standby {
+				t.Errorf("ClusterInfo.IsSlave = %v, want %v", cluster.IsSlave, standby)
+			}
+
+			activeClient := false
+			for _, client := range info.ConnectedClients {
+				if string(client.Usename) == test.username && client.State.String == "active" {
+					activeClient = true
+				}
+			}
+			if !activeClient {
+				t.Errorf("ConnectedClients has no active %s session", test.username)
+			}
+
+			portSetting := ""
+			for _, setting := range info.Settings {
+				if setting.Name == "port" {
+					portSetting = setting.Setting
+				}
+			}
+			if portSetting != test.port {
+				t.Errorf("Settings port = %q, want %q", portSetting, test.port)
 			}
 		})
 	}
@@ -157,15 +205,29 @@ func TestCollectPerDatabaseInfo(t *testing.T) {
 				t.Fatalf("Cannot run New using %q: %s", test.dsn("postgres"), err)
 			}
 			names := info.DatabaseNames()
-			n := 0
-			for _, name := range names {
-				if name != "postgres" && !strings.HasPrefix(name, "template") {
-					n++
+			for _, want := range []string{"pagila", "pt_test"} {
+				found := false
+				for _, name := range names {
+					if name == want {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("database %s is not in %v", want, names)
 				}
 			}
-			if n < 2 {
-				t.Errorf("expected at least 2 user databases, got %d: %v", n, names)
+
+			pagila := connectTo(t, test, "pagila")
+			defer pagila.Close()
+			tx, err := pagila.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatalf("Cannot begin a transaction in pagila: %s", err)
 			}
+			defer tx.Rollback()
+			if _, err := tx.Exec("LOCK TABLE film IN ACCESS SHARE MODE"); err != nil {
+				t.Fatalf("Cannot lock pagila.film: %s", err)
+			}
+
 			for _, dbName := range names {
 				conn := connectTo(t, test, dbName)
 				if err := info.CollectPerDatabaseInfo(conn, dbName); err != nil {
@@ -173,6 +235,27 @@ func TestCollectPerDatabaseInfo(t *testing.T) {
 						dbName, test.dsn(dbName), err)
 				}
 				conn.Close()
+			}
+
+			filmLocked := false
+			for _, access := range info.TableAccess["pagila"] {
+				if access.Relname == "film" && access.Datname.String == "pagila" {
+					filmLocked = true
+				}
+			}
+			if !filmLocked {
+				t.Errorf("TableAccess for pagila does not show the lock held on film")
+			}
+
+			for _, dbName := range names {
+				table := info.TableCacheHitRatio[dbName]
+				if table == nil || !table.Ratio.Valid || table.Ratio.Float64 < 0 || table.Ratio.Float64 > 1 {
+					t.Errorf("TableCacheHitRatio for %s = %+v, want a ratio in [0, 1]", dbName, table)
+				}
+				index := info.IndexCacheHitRatio[dbName]
+				if index == nil || !index.Ratio.Valid || index.Ratio.Float64 < 0 || index.Ratio.Float64 > 1 {
+					t.Errorf("IndexCacheHitRatio for %s = %+v, want a ratio in [0, 1]", dbName, index)
+				}
 			}
 		})
 	}
@@ -202,8 +285,16 @@ func TestReplicationTopology(t *testing.T) {
 		}
 		t.Fatalf("Cannot collect global information using %q", tests[0].dsn("postgres"))
 	}
-	if len(info.SlaveHosts10) == 0 {
-		t.Errorf("no standby connected to %s, the sandbox is not replicating", tests[0].name)
+	if len(info.SlaveHosts10) != 1 {
+		t.Fatalf("%s has %d standbys, want 1", tests[0].name, len(info.SlaveHosts10))
+	}
+	standby := info.SlaveHosts10[0]
+	if standby.State.String != "streaming" || standby.ClientAddr.String != tu.IPv4Host {
+		t.Errorf("standby on %s: state %q from %q, want \"streaming\" from %q",
+			tests[0].name, standby.State.String, standby.ClientAddr.String, tu.IPv4Host)
+	}
+	if !standby.ByteLag.Valid || standby.ByteLag.Float64 < 0 {
+		t.Errorf("standby on %s: byte lag %+v, want a non-negative number", tests[0].name, standby.ByteLag)
 	}
 
 	replica := connectTo(t, tests[1], "postgres")
@@ -214,6 +305,20 @@ func TestReplicationTopology(t *testing.T) {
 	}
 	if !inRecovery {
 		t.Errorf("%s is not in recovery, expected the standby", tests[1].name)
+	}
+
+	replicaInfo, err := pginfo.NewWithLogger(replica, nil, testSleep, logger)
+	if err != nil {
+		t.Fatalf("Cannot run NewWithLogger using %q: %s", tests[1].dsn("postgres"), err)
+	}
+	if errs := replicaInfo.CollectGlobalInfo(replica); len(errs) > 0 {
+		for _, err := range errs {
+			t.Logf("collect error: %s", err)
+		}
+		t.Fatalf("Cannot collect global information using %q", tests[1].dsn("postgres"))
+	}
+	if len(replicaInfo.SlaveHosts10) != 0 {
+		t.Errorf("%s reports %d standbys of its own, want none", tests[1].name, len(replicaInfo.SlaveHosts10))
 	}
 }
 
