@@ -79,6 +79,17 @@ export PT_PG_SANDBOX_BASEDIR=$(pg_sandbox build --bin-dir ~/pgsql 18.4)
 
 ```sh
 sandbox-pg/test-env checkconfig   # verify the prerequisites
+make -C src/go test-pg            # build, start the sandbox, run the tests, stop it
+```
+
+`make test-pg` reuses a sandbox that is already running and leaves it running.
+Otherwise it starts one and stops it afterwards, even when the tests fail.
+`sandbox-pg/test-env test` does the same without building `bin/pt-pg-summary`
+first.
+
+To keep the sandbox up between runs, drive it by hand:
+
+```sh
 sandbox-pg/test-env start         # deploy primary + standby, seed the data
 sandbox-pg/test-env status        # show the cluster and the discovered ports
 
@@ -107,7 +118,8 @@ psql -h "$PG_IPV4_HOST" -p "$PG_REPLICA_PORT" -U "$PG_USERNAME" -d pagila
 The tests **skip** when no sandbox is running; they do not fail. If the suite
 reports skips, run `test-env start` first.
 
-Set `PT_PG_SANDBOX_REQUIRED=1` to turn those skips into failures instead.
+Set `PT_PG_SANDBOX_REQUIRED=1` to turn those skips into failures instead;
+`make test-pg` and `test-env test` always do.
 
 ## Test data
 
