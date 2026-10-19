@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 const (
@@ -46,6 +47,7 @@ type Dumper struct {
 	kubeconfig                       string
 	namespace                        string
 	location                         string
+	dumpFile                         string
 	logger                           *SafeLogger
 	mode                             int64
 	crTypes                          []string
@@ -59,6 +61,7 @@ type Dumper struct {
 	sslSecrets      map[string]bool
 	individualFiles []individualFile
 	clientSet       *kubernetes.Clientset
+	describeClient  kubernetes.Interface
 	dynamicClient   *dynamic.DynamicClient
 	discoveryClient *discovery.DiscoveryClient
 	archive         *tarWriter
@@ -77,7 +80,10 @@ type individualFile struct {
 	filepaths      []string
 	dirpaths       map[string][]string // map[tarFolder][]dirPaths
 	toolCmds       map[string][]toolLog
+	dynamicEnv     map[string]dynamicEnvFunc
 }
+
+type dynamicEnvFunc func(ctx context.Context, pod corev1.Pod, container string, env map[string]string) string
 
 // resourceMap struct is used to dump the resources from namespace scope or cluster scope
 type resourceMap struct {
@@ -91,7 +97,7 @@ type exportJob struct {
 }
 
 // New return new Dumper object
-func New(location, namespace, kubeconfig, clusterName, forwardport, resource string, skipPodSummary bool, concurrentExportWorkers int) (*Dumper, error) {
+func New(location, dumpFile, namespace, kubeconfig, clusterName, forwardport, resource string, skipPodSummary bool, concurrentExportWorkers int) (*Dumper, error) {
 	safeLog := NewSafeLogger()
 
 	log.AddHook(&ErrorArchiveHook{safeLogger: safeLog})
@@ -117,7 +123,15 @@ func New(location, namespace, kubeconfig, clusterName, forwardport, resource str
 	config.QPS = float32(concurrentExportWorkers) + 1
 	config.Burst = (concurrentExportWorkers + 1) * 2
 
-	clientset, err := kubernetes.NewForConfig(config)
+	clientsetConfig := rest.CopyConfig(config)
+	clientsetConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, config.Burst)
+
+	clientset, err := kubernetes.NewForConfig(clientsetConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse kubeconfig: %w", err)
+	}
+
+	describeClient, err := kubernetes.NewForConfig(describeRestConfig(clientsetConfig, describeTimeout))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse kubeconfig: %w", err)
 	}
@@ -132,6 +146,7 @@ func New(location, namespace, kubeconfig, clusterName, forwardport, resource str
 	d := &Dumper{
 		kubeconfig:                       kubeconfig,
 		location:                         location,
+		dumpFile:                         dumpFile,
 		mode:                             int64(0o777),
 		namespace:                        namespace,
 		forwardport:                      strings.TrimSpace(forwardport),
@@ -140,6 +155,7 @@ func New(location, namespace, kubeconfig, clusterName, forwardport, resource str
 		concurrentExportWorkersCluster:   concurrentExportWorkers / 2,
 		concurrentExportWorkersNamespace: concurrentExportWorkers / 2,
 		clientSet:                        clientset,
+		describeClient:                   describeClient,
 		dynamicClient:                    dynclient,
 		discoveryClient:                  discclient,
 		restConfig:                       config,
@@ -166,6 +182,11 @@ func New(location, namespace, kubeconfig, clusterName, forwardport, resource str
 			}
 		case "pgv2":
 			err := d.addPg2()
+			if err != nil {
+				return nil, err
+			}
+		case "crunchy":
+			err := d.addCrunchy()
 			if err != nil {
 				return nil, err
 			}
@@ -214,7 +235,8 @@ func buildRestConfig(kubeconfig, clusterName string) (*rest.Config, error) {
 // DumpCluster create dump of a cluster in Dumper.location
 func (d *Dumper) DumpCluster() error {
 	var err error
-	d.archive, err = NewTarWriter(d.location + ".tar.gz")
+	archivePath := d.archiveFileName(time.Now())
+	d.archive, err = NewTarWriter(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to create archive: %v", err)
 	}
@@ -265,8 +287,16 @@ func (d *Dumper) DumpCluster() error {
 	close(jobsChannel)
 	wg.Wait()
 
-	log.Infof("export complete\ndata saved to %s", d.location)
+	log.Infof("export complete\ndata saved to %s", archivePath)
 	return nil
+}
+
+func (d *Dumper) archiveFileName(t time.Time) string {
+	name := d.dumpFile
+	if name == "" {
+		name = d.location + "_{timestamp}.tar.gz"
+	}
+	return strings.ReplaceAll(name, "{timestamp}", t.UTC().Format("20060102150405"))
 }
 
 func (d *Dumper) export(ctx context.Context) error {
@@ -603,6 +633,15 @@ func (d *Dumper) resilientWorker(id int, ctx context.Context, cancel context.Can
 				log.Errorf("error exporting logs: %v", err)
 			}
 
+			if err := d.getPodDescribe(job.Pod); err != nil {
+				if isSpaceError(err) {
+					log.Infof("worker %d stopping app: %v", id, err)
+					cancel()
+					return
+				}
+				log.Error(err)
+			}
+
 			if job.Pod.Status.Phase == corev1.PodRunning {
 				d.exportPodSummaryAndFiles(ctx, job)
 			}
@@ -631,6 +670,9 @@ func matchesCR(cr string, podLabels map[string]string) bool {
 	case "pgv2":
 		return podLabels["pgv2.percona.com/version"] != "" &&
 			podLabels["postgres-operator.crunchydata.com/instance"] != ""
+	case "crunchy":
+		return podLabels["postgres-operator.crunchydata.com/instance"] != "" &&
+			podLabels["pgv2.percona.com/version"] == ""
 	}
 
 	return false
