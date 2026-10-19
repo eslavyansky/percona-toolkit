@@ -21,7 +21,7 @@ err() {
 }
 
 usage() {
-    err "Usage: test-env start|stop|restart|status|checkconfig|kill"         \
+    err "Usage: test-env start|stop|restart|status|checkconfig|kill|test"    \
         ""                                                                   \
         "  start       Deploy the primary + standby cluster in $CLUSTER_DIR" \
         "  stop        Destroy the cluster and remove the env file"          \
@@ -29,6 +29,8 @@ usage() {
         "  restart     Stop and start the cluster"                           \
         "  status      Print cluster status and the discovered settings"     \
         "  checkconfig Check the test environment prerequisites"             \
+        "  test        Run the pt-pg-summary tests, starting and stopping"   \
+        "              the cluster unless one is already running"            \
         ""
 }
 
@@ -288,6 +290,53 @@ status() {
     fi
 }
 
+running() {
+    [ -f "$ENV_FILE" ] || return 1
+    (
+        . "$ENV_FILE" &&
+        "$PT_PG_SANDBOX_BASEDIR/bin/pg_isready" -h "$PG_IPV4_HOST" -p "$PG_SOURCE_PORT" -q &&
+        "$PT_PG_SANDBOX_BASEDIR/bin/pg_isready" -h "$PG_IPV4_HOST" -p "$PG_REPLICA_PORT" -q
+    )
+}
+
+go_tests() {
+    (
+        cd "$SANDBOX_PG_DIR/../src/go" &&
+        PT_PG_SANDBOX_REQUIRED=1 go test -v -count=1 ./pt-pg-summary/...
+    )
+}
+
+run_tests() {
+    local rc
+
+    if ! checkconfig "" ; then
+        err "bad config, run '$0 checkconfig'"
+        return 1
+    fi
+
+    if running; then
+        echo "Using the running PostgreSQL sandbox."
+        go_tests
+        return
+    fi
+
+    if [ -e "$CLUSTER_DIR" ]; then
+        err "$CLUSTER_DIR exists but the sandbox is not answering, run '$0 stop' first"
+        return 1
+    fi
+
+    start || return 1
+    trap 'stop; exit 130' INT TERM
+    go_tests
+    rc=$?
+    trap - INT TERM
+
+    if ! stop && [ "$rc" -eq 0 ]; then
+        rc=1
+    fi
+    return $rc
+}
+
 case "${1:-}" in
     start)       start ;;
     stop)        stop ;;
@@ -295,5 +344,6 @@ case "${1:-}" in
     status)      status ;;
     kill)        kill_servers ;;
     checkconfig) checkconfig 1 ;;
+    test)        run_tests ;;
     *)           usage; exit 1 ;;
 esac
