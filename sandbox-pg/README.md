@@ -98,6 +98,7 @@ sandbox-pg/test-env status        # show the cluster and the discovered ports
 cd src/go && make build           # TestVersionOption needs bin/pt-pg-summary
 go test -v ./pt-pg-summary/...
 
+cd ../..
 sandbox-pg/test-env stop          # destroy everything
 ```
 
