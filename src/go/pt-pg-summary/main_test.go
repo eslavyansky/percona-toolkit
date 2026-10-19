@@ -260,3 +260,37 @@ func TestVersionOption(t *testing.T) {
 		t.Errorf("%s --version returns wrong result:\n%s", toolname, out)
 	}
 }
+
+func TestVerboseEnablesInfoLog(t *testing.T) {
+	skipIfNoSandbox(t)
+
+	conn := []string{
+		"--host=" + tu.IPv4Host,
+		"--port=" + tu.SourcePort,
+		"--username=" + tu.Username,
+		"--password=" + tu.Password,
+		"--disable-ssl",
+		"--sleep=1",
+	}
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantInfo bool
+	}{
+		{"default", conn, false},
+		{"verbose", append([]string{"--verbose"}, conn...), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			cmd := exec.Command("../../../bin/"+toolname, test.args...)
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("%s %v: %s\n%s", toolname, test.args, err, stderr.String())
+			}
+			gotInfo := strings.Contains(stderr.String(), `msg="Connection OK"`)
+			if gotInfo != test.wantInfo {
+				t.Errorf("info log shown = %v, want %v; stderr:\n%s", gotInfo, test.wantInfo, stderr.String())
+			}
+		})
+	}
+}
