@@ -107,7 +107,7 @@ sandbox-pg/test-env start         # deploy primary + standby, seed the data
 sandbox-pg/test-env status        # show the cluster and the discovered ports
 
 cd src/go && make build           # TestVersionOption needs bin/pt-pg-summary
-go test -v ./pt-pg-summary/...
+go test -v ./pt-pg-summary/... ./lib/pginfo/...
 
 cd ../..
 sandbox-pg/test-env stop          # destroy everything

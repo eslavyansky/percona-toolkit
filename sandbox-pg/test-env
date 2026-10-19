@@ -302,7 +302,7 @@ running() {
 go_tests() {
     (
         cd "$SANDBOX_PG_DIR/../src/go" &&
-        PT_PG_SANDBOX_REQUIRED=1 go test -v -count=1 ./pt-pg-summary/...
+        PT_PG_SANDBOX_REQUIRED=1 go test -v -count=1 ./pt-pg-summary/... ./lib/pginfo/...
     )
 }
 
