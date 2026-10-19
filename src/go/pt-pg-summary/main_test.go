@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"os"
@@ -21,11 +22,13 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/percona/percona-toolkit/src/go/lib/pginfo"
 	"github.com/percona/percona-toolkit/src/go/pt-pg-summary/internal/tu"
+	"github.com/percona/percona-toolkit/src/go/pt-pg-summary/templates"
 )
 
 type Test struct {
@@ -211,6 +214,39 @@ func TestReplicationTopology(t *testing.T) {
 	}
 	if !inRecovery {
 		t.Errorf("%s is not in recovery, expected the standby", tests[1].name)
+	}
+}
+
+func TestReportShowsPortAndDataDirectory(t *testing.T) {
+	skipIfNoSandbox(t)
+
+	db := connectTo(t, tests[0], "postgres")
+	defer db.Close()
+
+	info, err := pginfo.NewWithLogger(db, nil, testSleep, logger)
+	if err != nil {
+		t.Fatalf("Cannot run NewWithLogger using %q: %s", tests[0].dsn("postgres"), err)
+	}
+	if errs := info.CollectGlobalInfo(db); len(errs) > 0 {
+		for _, err := range errs {
+			t.Logf("collect error: %s", err)
+		}
+		t.Fatalf("Cannot collect global information using %q", tests[0].dsn("postgres"))
+	}
+
+	tmpl := template.Must(template.New("master").Funcs(funcsMap()).Parse(templates.TPL))
+	var out bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&out, "port_and_datadir", info.PortAndDatadir); err != nil {
+		t.Fatalf("Cannot render port_and_datadir: %s", err)
+	}
+
+	for _, row := range []string{
+		`\| port +\| ` + tu.SourcePort + ` +\|`,
+		`\| data_directory +\| /\S+ +\|`,
+	} {
+		if !regexp.MustCompile(row).Match(out.Bytes()) {
+			t.Errorf("no row matching %q in:\n%s", row, out.String())
+		}
 	}
 }
 
