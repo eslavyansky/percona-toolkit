@@ -16,7 +16,9 @@ package dumper
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,6 +57,33 @@ func TestMatchesCR(t *testing.T) {
 				"postgres-operator.crunchydata.com/instance": "test",
 			},
 			expected: true,
+		},
+		{
+			name:      "crunchy with instance label",
+			cr:        "crunchy",
+			podLabels: map[string]string{"postgres-operator.crunchydata.com/instance": "test"},
+			expected:  true,
+		},
+		{
+			name: "crunchy does not match pgv2 pod",
+			cr:   "crunchy",
+			podLabels: map[string]string{
+				"pgv2.percona.com/version":                   "1.0",
+				"postgres-operator.crunchydata.com/instance": "test",
+			},
+			expected: false,
+		},
+		{
+			name:      "pgv2 does not match crunchy pod",
+			cr:        "pgv2",
+			podLabels: map[string]string{"postgres-operator.crunchydata.com/instance": "test"},
+			expected:  false,
+		},
+		{
+			name:      "crunchy without instance label",
+			cr:        "crunchy",
+			podLabels: map[string]string{"postgres-operator.crunchydata.com/cluster": "test"},
+			expected:  false,
 		},
 		{
 			name:      "no match",
@@ -171,6 +200,16 @@ func TestResourceTypeParsing(t *testing.T) {
 			expected: "psmdb",
 		},
 		{
+			name:     "crunchy exact match",
+			cr:       "crunchy",
+			expected: "crunchy",
+		},
+		{
+			name:     "crunchy API group",
+			cr:       "postgres-operator",
+			expected: "crunchy",
+		},
+		{
 			name:     "unknown returns as is",
 			cr:       "unknown",
 			expected: "unknown",
@@ -182,6 +221,49 @@ func TestResourceTypeParsing(t *testing.T) {
 			result := resourceType(tt.cr)
 			if result != tt.expected {
 				t.Errorf("resourceType(%q) = %q; want %q", tt.cr, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResolvePgLogDirectory(t *testing.T) {
+	tests := []struct {
+		name     string
+		out      string
+		pgdata   string
+		expected string
+	}{
+		{
+			name:     "empty output falls back to PGDATA/log",
+			out:      "",
+			pgdata:   "/pgdata/pg18",
+			expected: "/pgdata/pg18/log",
+		},
+		{
+			name:     "relative directory",
+			out:      "log\n",
+			pgdata:   "/pgdata/pg18",
+			expected: "/pgdata/pg18/log",
+		},
+		{
+			name:     "absolute directory",
+			out:      "/pgdata/logs/postgres\n",
+			pgdata:   "/pgdata/pg18",
+			expected: "/pgdata/logs/postgres",
+		},
+		{
+			name:     "nested relative directory",
+			out:      "  pg_log/archive  ",
+			pgdata:   "/pgdata/pg18",
+			expected: "/pgdata/pg18/pg_log/archive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolvePgLogDirectory(tt.out, tt.pgdata)
+			if result != tt.expected {
+				t.Errorf("resolvePgLogDirectory(%q, %q) = %q; want %q", tt.out, tt.pgdata, result, tt.expected)
 			}
 		})
 	}
@@ -340,4 +422,124 @@ func TestGetSummarySkipPodSummaryFalse(t *testing.T) {
 
 		d.getSummary(context.Background(), job, "pxc", "/tmp/summary.txt")
 	})
+}
+
+func TestArchiveFileName(t *testing.T) {
+	ts := time.Date(2026, 9, 29, 23, 8, 11, 0, time.FixedZone("EEST", 3*60*60))
+	tests := []struct {
+		dumpFile string
+		want     string
+	}{
+		{"", "cluster-dump_20260929200811.tar.gz"},
+		{"cluster-dump_{timestamp}.tar.gz", "cluster-dump_20260929200811.tar.gz"},
+		{"my-dump.tar.gz", "my-dump.tar.gz"},
+		{"my-dump", "my-dump"},
+		{"{timestamp}_my-dump.tar.gz", "20260929200811_my-dump.tar.gz"},
+		{"/tmp/my-dump_{timestamp}.tar.gz", "/tmp/my-dump_20260929200811.tar.gz"},
+	}
+	for _, tt := range tests {
+		d := &Dumper{location: "cluster-dump", dumpFile: tt.dumpFile}
+		if got := d.archiveFileName(ts); got != tt.want {
+			t.Errorf("archiveFileName() with dumpFile=%q = %q, want %q", tt.dumpFile, got, tt.want)
+		}
+	}
+}
+
+func TestNewTarWriterDoesNotOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cluster-dump_20260929200811.tar.gz")
+	if err := os.WriteFile(path, []byte("previous dump"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewTarWriter(path); err == nil {
+		t.Fatal("NewTarWriter() succeeded on an existing file")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "previous dump" {
+		t.Errorf("existing archive was modified: %q", data)
+	}
+}
+
+func TestPgPodMatchesSingleCR(t *testing.T) {
+	// autoCustomResource detects both API groups on a pgv2 cluster
+	crTypes := []string{"pgv2", "postgres-operator"}
+
+	tests := []struct {
+		name      string
+		podLabels map[string]string
+		expected  string
+	}{
+		{
+			name: "pgv2 pod",
+			podLabels: map[string]string{
+				"pgv2.percona.com/version":                   "2.8.0",
+				"postgres-operator.crunchydata.com/instance": "test",
+			},
+			expected: "pgv2",
+		},
+		{
+			name:      "crunchy pod",
+			podLabels: map[string]string{"postgres-operator.crunchydata.com/instance": "test"},
+			expected:  "crunchy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var matched []string
+			for _, cr := range crTypes {
+				if matchesCR(resourceType(cr), tt.podLabels) {
+					matched = append(matched, resourceType(cr))
+				}
+			}
+			if len(matched) != 1 || matched[0] != tt.expected {
+				t.Errorf("pod %v matched %v; want [%s]", tt.podLabels, matched, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPg2IndividualFile(t *testing.T) {
+	d := &Dumper{}
+
+	for _, resourceName := range []string{"pgv2", "crunchy"} {
+		t.Run(resourceName, func(t *testing.T) {
+			f := d.pg2IndividualFile(resourceName)
+
+			if f.resourceName != resourceName {
+				t.Errorf("resourceName = %q; want %q", f.resourceName, resourceName)
+			}
+			if len(f.containerNames) != 1 || f.containerNames[0] != "database" {
+				t.Errorf("containerNames = %v; want [database]", f.containerNames)
+			}
+			if got := f.dirpaths["pg_log"]; len(got) != 1 || got[0] != "$"+pgLogDirectoryVar {
+				t.Errorf("dirpaths[pg_log] = %v; want [$%s]", got, pgLogDirectoryVar)
+			}
+			if f.dynamicEnv[pgLogDirectoryVar] == nil {
+				t.Errorf("dynamicEnv has no resolver for %s", pgLogDirectoryVar)
+			}
+		})
+	}
+}
+
+func TestGetPodSummaryUnknownResource(t *testing.T) {
+	d := &Dumper{}
+
+	_, err := d.getPodSummary(context.Background(), corev1.Pod{}, "unknown")
+	if err == nil || err.Error() != "unimplemented podSummary" {
+		t.Errorf("getPodSummary(unknown) error = %v; want unimplemented podSummary", err)
+	}
+}
+
+func TestPodDescribePath(t *testing.T) {
+	d := &Dumper{location: "cluster-dump"}
+	got := d.PodDescribePath("pxc", "pxc-node-0")
+	want := filepath.Join("cluster-dump", "pxc", "pxc-node-0", "describe.txt")
+	if got != want {
+		t.Fatalf("PodDescribePath = %q, want %q", got, want)
+	}
 }
