@@ -462,6 +462,11 @@ func getHostInfo(ctx context.Context, client *mongo.Client) (*hostInfo, error) {
 			NodeType:          nodeType,
 			CmdlineArgs:       nil,
 		}
+
+		if md, err := util.GetMasterDoc(ctx, client); err == nil && md.IsArbiter() {
+			i.NodeType = "ARBITER"
+			i.IsArbiter = true
+		}
 	}
 
 	var cmdOpts proto.CommandLineOptions
