@@ -285,15 +285,17 @@ func main() {
 
 	ci := &collectedInfo{}
 
-	ci.MongosInfo, err = getMongosInfo(ctx, client)
-	if err != nil {
-		log.Warnf("[Warning] cannot get mongos info: %v\n", err)
-	}
-
 	ci.HostInfo, err = getHostInfo(ctx, client)
 	if err != nil {
 		log.Errorf("Cannot get host info for %q: %s", clientOptions.Hosts, err)
 		os.Exit(cannotGetHostInfo) //nolint:gocritic
+	}
+
+	if !ci.HostInfo.IsArbiter {
+		ci.MongosInfo, err = getMongosInfo(ctx, client)
+		if err != nil {
+			log.Warnf("[Warning] cannot get mongos info: %v\n", err)
+		}
 	}
 
 	if ci.ReplicaMembers, err = util.GetReplicasetMembers(ctx, clientOptions); err != nil {
@@ -312,12 +314,12 @@ func main() {
 		}
 	}
 
-	if ci.HostInfo != nil {
+	if ci.HostInfo == nil {
+		log.Warn("Cannot check security settings since host info is not available (permissions?)")
+	} else if !ci.HostInfo.IsArbiter {
 		if ci.SecuritySettings, err = getSecuritySettings(ctx, client, ci.HostInfo.Version); err != nil {
 			log.Errorf("[Error] cannot get security settings: %v\n", err)
 		}
-	} else {
-		log.Warn("Cannot check security settings since host info is not available (permissions?)")
 	}
 
 	if ci.OplogInfo, err = oplog.GetOplogInfo(ctx, hostnames, clientOptions); err != nil {
