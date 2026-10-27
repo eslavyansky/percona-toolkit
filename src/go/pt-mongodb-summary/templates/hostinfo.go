@@ -41,7 +41,7 @@ const HostInfo = `# This host
 {{- if .IsArbiter }}
 
 # Arbiter ###############################################################################################
-This node is a replica-set ARBITER: it holds no data, so host, security, storage and
-running operations details are unavailable from this member.
+This node is a replica-set ARBITER: it holds no data, so host, security and storage
+details are unavailable from this member.
 {{- end -}}
 `
