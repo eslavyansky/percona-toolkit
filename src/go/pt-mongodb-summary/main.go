@@ -136,6 +136,7 @@ type security struct {
 	BindIP      string
 	Port        int64
 	WarningMsgs []string
+	IsArbiter   bool
 }
 
 type databases struct {
@@ -314,12 +315,12 @@ func main() {
 		}
 	}
 
-	if ci.HostInfo == nil {
-		log.Warn("Cannot check security settings since host info is not available (permissions?)")
-	} else if !ci.HostInfo.IsArbiter {
-		if ci.SecuritySettings, err = getSecuritySettings(ctx, client, ci.HostInfo.Version); err != nil {
+	if ci.HostInfo != nil {
+		if ci.SecuritySettings, err = getSecuritySettings(ctx, client, ci.HostInfo.Version, ci.HostInfo.IsArbiter); err != nil {
 			log.Errorf("[Error] cannot get security settings: %v\n", err)
 		}
+	} else {
+		log.Warn("Cannot check security settings since host info is not available (permissions?)")
 	}
 
 	if ci.OplogInfo, err = oplog.GetOplogInfo(ctx, hostnames, clientOptions); err != nil {
@@ -618,10 +619,11 @@ func sizeAndUnit(size int64) (float64, string) {
 	return newSize, unit[idx]
 }
 
-func getSecuritySettings(ctx context.Context, client *mongo.Client, ver string) (*security, error) {
+func getSecuritySettings(ctx context.Context, client *mongo.Client, ver string, isArbiter bool) (*security, error) {
 	s := security{
-		Auth: "disabled",
-		SSL:  "disabled",
+		Auth:      "disabled",
+		SSL:       "disabled",
+		IsArbiter: isArbiter,
 	}
 
 	v26, _ := version.NewVersion("2.6")
@@ -681,6 +683,10 @@ func getSecuritySettings(ctx context.Context, client *mongo.Client, ver string) 
 				}
 			}
 		}
+	}
+
+	if isArbiter {
+		return &s, nil
 	}
 
 	if s.Users, s.Roles, err = getUserRolesCount(ctx, client); err != nil {
