@@ -25,7 +25,9 @@ const HostInfo = `# This host
                 PID Owner | {{.ProcessName}}
                  Hostname | {{.Hostname}}
                   Version | {{.Version}}
+{{- if or .HostOsType .HostSystemCPUArch }}
                  Built On | {{.HostOsType}} {{.HostSystemCPUArch}}
+{{- end }}
 {{- if not .ProcCreateTime.IsZero }}
                   Started | {{.ProcCreateTime}}
 {{- end }}
@@ -40,7 +42,7 @@ const HostInfo = `# This host
 {{- end }}
 {{- if .IsArbiter }}
 
-# Arbiter ###############################################################################################
+# Arbiter ################################################################################################
 This node is a replica-set ARBITER: it holds no data and does not accept user logins,
 so user/role counts, mongos and oplog details are not collected from it.
 {{- end -}}
