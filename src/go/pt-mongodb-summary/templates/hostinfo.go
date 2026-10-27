@@ -22,9 +22,13 @@ const HostInfo = `# This host
 {{- if .ProcUserName }}
                      User | {{.ProcUserName }}
 {{- end }}
+{{- if .ProcessName }}
                 PID Owner | {{.ProcessName}}
+{{- end }}
                  Hostname | {{.Hostname}}
+{{- if .Version }}
                   Version | {{.Version}}
+{{- end }}
 {{- if or .HostOsType .HostSystemCPUArch }}
                  Built On | {{.HostOsType}} {{.HostSystemCPUArch}}
 {{- end }}

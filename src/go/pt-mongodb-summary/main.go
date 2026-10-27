@@ -300,7 +300,11 @@ func main() {
 	}
 
 	if ci.ReplicaMembers, err = util.GetReplicasetMembers(ctx, clientOptions); err != nil {
-		log.Warnf("[Warning] cannot get replicaset members: %v\n", err)
+		if ci.HostInfo.IsArbiter {
+			log.Infof("cannot get replicaset members: %v", err)
+		} else {
+			log.Warnf("[Warning] cannot get replicaset members: %v\n", err)
+		}
 	}
 
 	log.Debugf("replicaMembers:\n%+v\n", ci.ReplicaMembers)
@@ -317,7 +321,11 @@ func main() {
 
 	if ci.HostInfo != nil {
 		if ci.SecuritySettings, err = getSecuritySettings(ctx, client, ci.HostInfo.Version, ci.HostInfo.IsArbiter); err != nil {
-			log.Errorf("[Error] cannot get security settings: %v\n", err)
+			if ci.HostInfo.IsArbiter {
+				log.Infof("cannot get security settings: %v", err)
+			} else {
+				log.Errorf("[Error] cannot get security settings: %v\n", err)
+			}
 		}
 	} else {
 		log.Warn("Cannot check security settings since host info is not available (permissions?)")
@@ -376,12 +384,14 @@ func formatResults(ci *collectedInfo, format string) ([]byte, error) {
 			}
 		}
 
-		t := template.Must(template.New("replicas").Parse(templates.Replicas))
-		if err := t.Execute(buf, ci.ReplicaMembers); err != nil {
-			return nil, errors.Wrap(err, "cannot parse replicas section of the output template")
+		if ci.ReplicaMembers != nil || !ci.HostInfo.IsArbiter {
+			t := template.Must(template.New("replicas").Parse(templates.Replicas))
+			if err := t.Execute(buf, ci.ReplicaMembers); err != nil {
+				return nil, errors.Wrap(err, "cannot parse replicas section of the output template")
+			}
 		}
 
-		t = template.Must(template.New("hosttemplateData").Parse(templates.HostInfo))
+		t := template.Must(template.New("hosttemplateData").Parse(templates.HostInfo))
 		if err := t.Execute(buf, ci.HostInfo); err != nil {
 			return nil, errors.Wrap(err, "cannot parse hosttemplateData section of the output template")
 		}
